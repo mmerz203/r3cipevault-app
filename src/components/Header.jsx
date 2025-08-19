@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import AccountMenu from './AccountMenu';
 
-const Header = ({ onSearch }) => {
+const Header = ({ onSearch = () => {}, showSearch = true }) => {
   const [searchTerm, setSearchTerm] = useState('');
 
   const handleSearchChange = (e) => {
@@ -23,22 +23,24 @@ const Header = ({ onSearch }) => {
           <AccountMenu />
         </div>
         
-        <form onSubmit={handleSearchSubmit} className="relative">
-          <div className="relative">
-            <input
-              type="text"
-              placeholder="Search recipes..."
-              value={searchTerm}
-              onChange={handleSearchChange}
-              className="input-field pl-10 pr-4 text-sm"
-            />
-            <div className="absolute left-3 top-1/2 transform -translate-y-1/2">
-              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
+        {showSearch && (
+          <form onSubmit={handleSearchSubmit} className="relative">
+            <div className="relative">
+              <input
+                type="text"
+                placeholder="Search recipes..."
+                value={searchTerm}
+                onChange={handleSearchChange}
+                className="input-field pl-10 pr-4 text-sm"
+              />
+              <div className="absolute left-3 top-1/2 transform -translate-y-1/2">
+                <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+              </div>
             </div>
-          </div>
-        </form>
+          </form>
+        )}
       </div>
     </header>
   );

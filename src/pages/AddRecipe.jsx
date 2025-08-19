@@ -1,9 +1,17 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import Header from '../components/Header';
+import { useUser } from '../context/UserContext';
+import { db, saveRecipeForUser } from '../firebase';
+import toast from 'react-hot-toast';
+import { doc, getDoc } from 'firebase/firestore';
 
 const AddRecipe = () => {
   const navigate = useNavigate();
+  const { id } = useParams();
+  const isEditMode = !!id;
+  const { user } = useUser();
+
   const [formData, setFormData] = useState({
     title: '',
     description: '',
@@ -13,6 +21,37 @@ const AddRecipe = () => {
     servings: '',
     difficulty: 'Easy'
   });
+
+  useEffect(() => {
+    if (isEditMode && user) {
+      const fetchRecipeData = async () => {
+        const recipeRef = doc(db, 'users', user.uid, 'recipes', id);
+        try {
+          const docSnap = await getDoc(recipeRef);
+          if (docSnap.exists()) {
+            const recipeData = docSnap.data();
+            setFormData({
+              title: recipeData.title || '',
+              description: recipeData.description || '',
+              ingredients: recipeData.ingredients || [''],
+              instructions: recipeData.instructions || [''],
+              cookTime: parseInt(recipeData.cookTime) || '',
+              servings: recipeData.servings || '',
+              difficulty: recipeData.difficulty || 'Easy',
+            });
+          } else {
+            toast.error("Recipe not found for editing.");
+            navigate('/');
+          }
+        } catch (error) {
+          toast.error("Failed to load recipe data.");
+          console.error("Error fetching recipe for edit:", error);
+          navigate('/');
+        }
+      };
+      fetchRecipeData();
+    }
+  }, [id, user, isEditMode, navigate]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -72,12 +111,57 @@ const AddRecipe = () => {
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    // TODO: Implement recipe saving logic
-    console.log('Recipe data:', formData);
-    // For now, just navigate back to home
-    navigate('/');
+    if (!user) { // This check is important for both modes
+      toast.error("You must be signed in to add a recipe.");
+      return;
+    }
+
+    const finalIngredients = formData.ingredients.filter(i => i.trim() !== '');
+    const finalInstructions = formData.instructions.filter(i => i.trim() !== '');
+
+    if (!formData.title.trim() || finalIngredients.length === 0 || finalInstructions.length === 0) {
+      toast.error("Please fill out the title and add at least one ingredient and instruction.");
+      return;
+    }
+
+    const recipePayload = {
+      ...formData,
+      cookTime: `${formData.cookTime} mins`,
+      ingredients: finalIngredients,
+      instructions: finalInstructions,
+    };
+
+    if (isEditMode) {
+      const updatedRecipe = {
+        ...recipePayload,
+        id: id, // Keep the existing ID
+        image: `https://source.unsplash.com/random/800x600/?food,${encodeURIComponent(formData.title)}`,
+      };
+      try {
+        await saveRecipeForUser(user.uid, updatedRecipe);
+        toast.success('Recipe updated successfully!');
+        navigate(`/recipes/${id}`);
+      } catch (error) {
+        toast.error('Failed to update recipe. Please try again.');
+        console.error("Error updating recipe:", error);
+      }
+    } else {
+      const newRecipe = {
+        ...recipePayload,
+        id: crypto.randomUUID(),
+        image: `https://source.unsplash.com/random/800x600/?food,${encodeURIComponent(formData.title)}`,
+      };
+      try {
+        await saveRecipeForUser(user.uid, newRecipe);
+        toast.success('Recipe added successfully!');
+        navigate('/');
+      } catch (error) {
+        toast.error('Failed to save recipe. Please try again.');
+        console.error("Error saving new recipe:", error);
+      }
+    }
   };
 
   return (
@@ -88,7 +172,9 @@ const AddRecipe = () => {
         <div className="max-w-2xl mx-auto px-4">
           <div className="bg-white rounded-lg shadow-md p-6">
             <div className="flex items-center justify-between mb-6">
-              <h1 className="text-2xl font-bold text-gray-800">Add New Recipe</h1>
+              <h1 className="text-2xl font-bold text-gray-800">
+                {isEditMode ? 'Edit Recipe' : 'Add New Recipe'}
+              </h1>
               <button
                 onClick={() => navigate('/')}
                 className="text-gray-500 hover:text-gray-700"
@@ -256,7 +342,7 @@ const AddRecipe = () => {
                   type="submit"
                   className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
                 >
-                  Save Recipe
+                  {isEditMode ? 'Update Recipe' : 'Save Recipe'}
                 </button>
               </div>
             </form>

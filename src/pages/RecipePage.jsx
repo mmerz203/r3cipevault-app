@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useUser } from '../context/UserContext';
-import { doc, setDoc, collection } from 'firebase/firestore';
+import { doc, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import toast from 'react-hot-toast';
 import AccountMenu from '../components/AccountMenu';
@@ -12,27 +12,114 @@ const RecipePage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useUser();
-  
-  const recipe = mockRecipes.find(r => r.id === parseInt(id));
+  const [recipe, setRecipe] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [isUserRecipe, setIsUserRecipe] = useState(false);
+
+  useEffect(() => {
+    const fetchRecipe = async () => {
+      setLoading(true);
+      setIsUserRecipe(false); // Reset on each fetch
+      console.log(`Attempting to find recipe with ID: ${id}`);
+
+      // Prioritize checking Firestore first to see if the user has a saved version.
+      if (user) {
+        const recipeRef = doc(db, 'users', user.uid, 'recipes', id);
+        console.log('Checking Firestore path:', recipeRef.path);
+        try {
+          const docSnap = await getDoc(recipeRef);
+          if (docSnap.exists()) {
+            console.log('Recipe found in Firestore:', docSnap.data());
+            setRecipe(docSnap.data());
+            setIsUserRecipe(true); // This is a user-created recipe
+            setLoading(false);
+            return; // Found user's version, no need to check mock data.
+          }
+        } catch (error) {
+          console.error("Error fetching recipe from Firestore:", error);
+          // Don't return, allow fallback to mock data.
+        }
+      }
+
+      // If not in Firestore, check the local mock data as a fallback.
+      const mockRecipe = mockRecipes.find(r => r.id.toString() === id);
+      if (mockRecipe) {
+        console.log('Recipe found in local mock data.');
+        setRecipe(mockRecipe);
+        // isUserRecipe remains false for pure mock recipes
+      }
+
+      setLoading(false);
+    };
+
+    fetchRecipe();
+  }, [id, user]);
 
   const handleSaveRecipe = async () => {
+    console.log('Attempting to save recipe...');
+
     if (!user) {
+      console.error('Save failed: No user object available.');
       toast.error('You must be signed in to save recipes.');
       return;
     }
+    console.log('User object available. UID:', user.uid);
 
-    if (!recipe) return;
+    if (!recipe) {
+      console.error('Save failed: No recipe data available.');
+      return;
+    }
 
     try {
+      // Firestore does not support `undefined` values. A common way to remove them
+      // is to serialize and deserialize the object. This also creates a deep copy.
+      const recipeToSave = JSON.parse(JSON.stringify(recipe));
+      console.log('Recipe data to be saved:', recipeToSave);
+
       // Use the recipe's numeric ID as the document ID in Firestore
       const recipeRef = doc(db, 'users', user.uid, 'recipes', recipe.id.toString());
-      await setDoc(recipeRef, recipe);
+      console.log('Saving to Firestore path:', recipeRef.path);
+
+      await setDoc(recipeRef, recipeToSave);
+      console.log('Successfully saved recipe to Firestore!');
       toast.success('Recipe saved to your vault!');
+      setIsUserRecipe(true); // Show edit/delete buttons immediately after saving.
     } catch (error) {
       console.error("Error saving recipe:", error);
       toast.error('Error saving recipe. Please try again later.');
     }
   };
+
+  const handleDeleteRecipe = async () => {
+    if (!user || !recipe || !isUserRecipe) {
+      toast.error("This recipe cannot be deleted.");
+      return;
+    }
+
+    // 1. Trigger a confirmation dialog.
+    if (window.confirm(`Are you sure you want to delete "${recipe.title}"? This cannot be undone.`)) {
+      try {
+        // 2. Make a "DELETE" request to the database.
+        const recipeRef = doc(db, 'users', user.uid, 'recipes', recipe.id.toString());
+        await deleteDoc(recipeRef);
+        toast.success('Recipe deleted successfully!');
+        // 4. Navigate the user back to the recipe list.
+        navigate('/');
+      } catch (error) {
+        // 3. Handle any potential errors.
+        console.error("Error deleting recipe:", error);
+        toast.error('Failed to delete recipe. Please try again.');
+      }
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen text-gray-700">
+        <p>Loading recipe...</p>
+      </div>
+    );
+  }
 
   if (!recipe) {
     return (
@@ -69,12 +156,44 @@ const RecipePage = () => {
         </button>
 
         <div className="absolute top-4 right-4 flex items-center space-x-2">
+          {isUserRecipe && (
+            <button
+              onClick={() => navigate(`/edit-recipe/${recipe.id}`)}
+              className="edit-button w-10 h-10 bg-blue-600 bg-opacity-80 text-white rounded-full flex items-center justify-center hover:bg-blue-700 transition-all"
+              title="Edit Recipe"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L15.232 5.232z" />
+              </svg>
+            </button>
+          )}
+          {isUserRecipe && (
+            <button
+              onClick={handleDeleteRecipe}
+              className="delete-button w-10 h-10 bg-red-600 bg-opacity-80 text-white rounded-full flex items-center justify-center hover:bg-red-700 transition-all"
+              title="Delete Recipe"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </button>
+          )}
           <button
             onClick={handleSaveRecipe}
-            className="save-button w-10 h-10 bg-black bg-opacity-50 text-white rounded-full flex items-center justify-center hover:bg-opacity-70 transition-all"
-            title="Save Recipe"
+            className={`save-button w-10 h-10 bg-black bg-opacity-50 text-white rounded-full flex items-center justify-center transition-all ${
+              isUserRecipe
+                ? 'cursor-not-allowed'
+                : 'hover:bg-opacity-70'
+            }`}
+            title={isUserRecipe ? 'Recipe is in your vault' : 'Save Recipe'}
+            disabled={isUserRecipe}
           >
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg
+              className="w-6 h-6"
+              fill={isUserRecipe ? 'currentColor' : 'none'}
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
             </svg>
           </button>

@@ -1,10 +1,50 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { mockMealPlan, mockRecipes } from '../data/mockData';
+import { useUser } from '../context/UserContext';
+import { db } from '../firebase';
+import { collection, query, onSnapshot } from 'firebase/firestore';
 
 const MealPlan = () => {
   const navigate = useNavigate();
   const [mealPlan, setMealPlan] = useState(mockMealPlan);
+  const [userRecipes, setUserRecipes] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const { user } = useUser();
+
+  useEffect(() => {
+    if (!user) {
+      setLoading(false);
+      return;
+    }
+
+    const recipesRef = collection(db, 'users', user.uid, 'recipes');
+    const q = query(recipesRef);
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const fetchedRecipes = snapshot.docs.map(doc => doc.data());
+      setUserRecipes(fetchedRecipes);
+      setLoading(false);
+    }, (error) => {
+      console.error("Error fetching user recipes for meal plan: ", error);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  const combinedRecipes = useMemo(() => {
+    const allRecipes = [...userRecipes, ...mockRecipes];
+    const uniqueRecipes = [];
+    const seenIds = new Set();
+    for (const recipe of allRecipes) {
+      if (!seenIds.has(recipe.id)) {
+        uniqueRecipes.push(recipe);
+        seenIds.add(recipe.id);
+      }
+    }
+    return uniqueRecipes;
+  }, [userRecipes]);
 
   const handleRecipeClick = (recipeId) => {
     if (recipeId) {
@@ -13,9 +53,8 @@ const MealPlan = () => {
   };
 
   const addMealToDay = (dayIndex, mealType) => {
-    // Simple implementation - just cycle through available recipes
-    const availableRecipes = mockRecipes.filter(recipe => recipe.id <= 6);
-    const randomRecipe = availableRecipes[Math.floor(Math.random() * availableRecipes.length)];
+    if (combinedRecipes.length === 0) return;
+    const randomRecipe = combinedRecipes[Math.floor(Math.random() * combinedRecipes.length)];
     
     const updatedMealPlan = { ...mealPlan };
     updatedMealPlan.meals[dayIndex][mealType] = {
@@ -83,6 +122,14 @@ const MealPlan = () => {
       </div>
     );
   };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen text-gray-700">
+        <p>Loading your meal plan...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="meal-plan-page min-h-screen bg-gray-50 pb-20">
@@ -176,7 +223,7 @@ const MealPlan = () => {
               mealPlan.meals.forEach(day => {
                 [day.breakfast, day.lunch, day.dinner].forEach(meal => {
                   if (meal) {
-                    const recipe = mockRecipes.find(r => r.id === meal.id);
+                    const recipe = combinedRecipes.find(r => r.id === meal.id);
                     if (recipe) {
                       recipe.ingredients.forEach(ingredient => ingredients.add(ingredient));
                     }
