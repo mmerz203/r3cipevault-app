@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { useUser } from './context/UserContext';
 
 // Import your page components
+import { mockShoppingList } from './data/mockData';
 import BottomNav from './components/BottomNav';
 import Footer from './components/Footer';
 import HomePage from './pages/HomePage';
@@ -14,6 +15,7 @@ import PantryPage from './pages/PantryPage';
 
 function App() {
   const { user, loading } = useUser();
+  const [shoppingList, setShoppingList] = useState(mockShoppingList);
 
   if (loading) {
     return (
@@ -35,8 +37,8 @@ function App() {
           <Route path="/add-recipe" element={<AddRecipe />} />
           <Route path="/edit-recipe/:id" element={<AddRecipe />} />
           <Route path="/recipes/:id" element={<RecipePage />} />
-          <Route path="/meal-plan" element={<MealPlan />} />
-          <Route path="/shopping-list" element={<ShoppingList />} />
+          <Route path="/meal-plan" element={<MealPlan setShoppingList={setShoppingList} />} />
+          <Route path="/shopping-list" element={<ShoppingList shoppingList={shoppingList} setShoppingList={setShoppingList} />} />
           <Route path="/pantry" element={<PantryPage />} />
         </Routes>
         <Footer />

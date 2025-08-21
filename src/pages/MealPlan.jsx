@@ -1,16 +1,51 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { mockMealPlan, mockRecipes } from '../data/mockData';
+import { mockMealPlan, mockRecipes, mockPantryItems } from '../data/mockData';
 import { useUser } from '../context/UserContext';
 import { db } from '../firebase';
 import { collection, query, onSnapshot } from 'firebase/firestore';
+import { ShoppingListService } from '../services/shoppingListService';
+import { generateWeekMealPlan, addWeeks, getWeekStart, formatDateRange, isToday } from '../utils/dateUtils';
+import WeekView from '../components/meal-plan/WeekView';
+import AddMealModal from '../components/meal-plan/AddMealModal';
+import SmartSuggestions from '../components/meal-plan/SmartSuggestions';
+import ShoppingListToast, { useShoppingListToast } from '../components/meal-plan/ShoppingListToast';
+import PrepDayView from '../components/meal-plan/PrepDayView';
+import MealPlanErrorBoundary from '../components/meal-plan/MealPlanErrorBoundary';
+import toast from 'react-hot-toast';
 
-const MealPlan = () => {
+const MealPlanComponent = () => {
   const navigate = useNavigate();
-  const [mealPlan, setMealPlan] = useState(mockMealPlan);
+  const [currentWeekStart, setCurrentWeekStart] = useState(() => getWeekStart(new Date()));
+  const [mealPlan, setMealPlan] = useState(() => generateWeekMealPlan(getWeekStart(new Date())));
   const [userRecipes, setUserRecipes] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [showAddMealModal, setShowAddMealModal] = useState(false);
+  const [selectedMealSlot, setSelectedMealSlot] = useState(null);
+  const [showPrepView, setShowPrepView] = useState(false);
+  const [showDatePicker, setShowDatePicker] = useState(false);
   const { user } = useUser();
+  const { toastState, showToast, hideToast } = useShoppingListToast();
+
+  // Update meal plan when week changes
+  useEffect(() => {
+    const newMealPlan = generateWeekMealPlan(currentWeekStart);
+    setMealPlan(newMealPlan);
+  }, [currentWeekStart]);
+
+  // Close date picker when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (showDatePicker && !event.target.closest('.date-picker-container')) {
+        setShowDatePicker(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showDatePicker]);
 
   useEffect(() => {
     if (!user) {
@@ -18,19 +53,48 @@ const MealPlan = () => {
       return;
     }
 
-    const recipesRef = collection(db, 'users', user.uid, 'recipes');
-    const q = query(recipesRef);
+    let unsubscribe = null;
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const fetchedRecipes = snapshot.docs.map(doc => doc.data());
-      setUserRecipes(fetchedRecipes);
-      setLoading(false);
-    }, (error) => {
-      console.error("Error fetching user recipes for meal plan: ", error);
-      setLoading(false);
-    });
+    const setupFirebaseListener = async () => {
+      try {
+        const recipesRef = collection(db, 'users', user.uid, 'recipes');
+        const q = query(recipesRef);
 
-    return () => unsubscribe();
+        unsubscribe = onSnapshot(q, (snapshot) => {
+          try {
+            const fetchedRecipes = snapshot.docs.map(doc => doc.data());
+            setUserRecipes(fetchedRecipes);
+            setLoading(false);
+          } catch (error) {
+            console.error("Error processing Firebase snapshot:", error);
+            setUserRecipes([]);
+            setLoading(false);
+          }
+        }, (error) => {
+          console.error("Firebase connection error:", error);
+          // Fallback to empty user recipes if Firebase fails
+          setUserRecipes([]);
+          setLoading(false);
+        });
+      } catch (error) {
+        console.error("Error setting up Firebase listener:", error);
+        // If Firebase setup fails completely, continue with empty user recipes
+        setUserRecipes([]);
+        setLoading(false);
+      }
+    };
+
+    setupFirebaseListener();
+
+    return () => {
+      if (unsubscribe) {
+        try {
+          unsubscribe();
+        } catch (error) {
+          console.error("Error unsubscribing from Firebase:", error);
+        }
+      }
+    };
   }, [user]);
 
   const combinedRecipes = useMemo(() => {
@@ -52,203 +116,394 @@ const MealPlan = () => {
     }
   };
 
-  const addMealToDay = (dayIndex, mealType) => {
-    if (combinedRecipes.length === 0) return;
-    const randomRecipe = combinedRecipes[Math.floor(Math.random() * combinedRecipes.length)];
-    
+  const handleAddMeal = (dayIndex, mealType, day) => {
+    setSelectedMealSlot({ dayIndex, mealType, day });
+    setShowAddMealModal(true);
+  };
+
+  const handleSelectRecipe = async (recipe) => {
+    if (selectedMealSlot) {
+      const { dayIndex, mealType } = selectedMealSlot;
+      const updatedMealPlan = { ...mealPlan };
+      updatedMealPlan.meals[dayIndex][mealType] = {
+        id: recipe.id,
+        title: recipe.title,
+        image: recipe.image
+      };
+      setMealPlan(updatedMealPlan);
+
+      // Automatically add recipe ingredients to shopping list
+      if (user && recipe.ingredients) {
+        try {
+          for (const ingredient of recipe.ingredients) {
+            await ShoppingListService.addOrUpdateItem(
+              user.uid,
+              ingredient,
+              '1', // Default quantity, will be aggregated intelligently
+              'meal_plan',
+              recipe.id
+            );
+          }
+          toast.success(`Added ${recipe.ingredients.length} ingredients to shopping list`);
+        } catch (error) {
+          console.error('Error adding ingredients to shopping list:', error);
+          toast.error('Failed to update shopping list');
+        }
+      }
+
+      // Show toast notification for shopping list update
+      const ingredientCount = recipe.ingredients?.length || 0;
+      showToast(recipe.title, ingredientCount);
+    }
+    setShowAddMealModal(false);
+    setSelectedMealSlot(null);
+  };
+
+  const handleRemoveMeal = async (dayIndex, mealType) => {
+    const removedMeal = mealPlan.meals[dayIndex][mealType];
     const updatedMealPlan = { ...mealPlan };
-    updatedMealPlan.meals[dayIndex][mealType] = {
+    updatedMealPlan.meals[dayIndex][mealType] = null;
+    setMealPlan(updatedMealPlan);
+
+    // Remove meal ingredients from shopping list
+    if (user && removedMeal) {
+      try {
+        await ShoppingListService.removeMealIngredients(user.uid, removedMeal.id);
+        toast.success('Removed meal ingredients from shopping list');
+      } catch (error) {
+        console.error('Error removing meal ingredients:', error);
+        toast.error('Failed to update shopping list');
+      }
+    }
+  };
+
+  const handleMoveMeal = (meal, sourceDayIndex, sourceMealType, targetDayIndex, targetMealType) => {
+    const updatedMealPlan = { ...mealPlan };
+    
+    // Get the meal at the target position
+    const targetMeal = updatedMealPlan.meals[targetDayIndex][targetMealType];
+    
+    // Move the meal to the new position
+    updatedMealPlan.meals[targetDayIndex][targetMealType] = meal;
+    
+    // If there was a meal at the target, move it to the source position (swap)
+    // Otherwise, just clear the source position
+    updatedMealPlan.meals[sourceDayIndex][sourceMealType] = targetMeal || null;
+    
+    setMealPlan(updatedMealPlan);
+  };
+
+  const handleSuggestionSelect = (recipe) => {
+    // Find the first empty slot and suggest adding there
+    for (let dayIndex = 0; dayIndex < mealPlan.meals.length; dayIndex++) {
+      const day = mealPlan.meals[dayIndex];
+      for (const mealType of ['breakfast', 'lunch', 'dinner']) {
+        if (!day[mealType]) {
+          setSelectedMealSlot({ dayIndex, mealType, day });
+          handleSelectRecipe(recipe);
+          return;
+        }
+      }
+    }
+    // If no empty slots, just show the modal
+    setSelectedMealSlot({ dayIndex: 0, mealType: 'breakfast', day: mealPlan.meals[0] });
+    handleSelectRecipe(recipe);
+  };
+
+  const generateShoppingList = () => {
+    const ingredients = new Set();
+    mealPlan.meals.forEach(day => {
+      [day.breakfast, day.lunch, day.dinner].forEach(meal => {
+        if (meal) {
+          const recipe = combinedRecipes.find(r => r.id === meal.id);
+          if (recipe) {
+            recipe.ingredients?.forEach(ingredient => ingredients.add(ingredient));
+          }
+        }
+      });
+    });
+    navigate('/shopping-list', { state: { mealPlanIngredients: Array.from(ingredients) } });
+  };
+
+  const clearAllMeals = async () => {
+    // Get all current meal IDs for removal from shopping list
+    const currentMealIds = new Set();
+    mealPlan.meals.forEach(day => {
+      if (day.breakfast) currentMealIds.add(day.breakfast.id);
+      if (day.lunch) currentMealIds.add(day.lunch.id);
+      if (day.dinner) currentMealIds.add(day.dinner.id);
+    });
+
+    const clearedMealPlan = {
+      ...mealPlan,
+      meals: mealPlan.meals.map(day => ({
+        ...day,
+        breakfast: null,
+        lunch: null,
+        dinner: null
+      }))
+    };
+    setMealPlan(clearedMealPlan);
+
+    // Remove all meal ingredients from shopping list
+    if (user && currentMealIds.size > 0) {
+      try {
+        for (const mealId of currentMealIds) {
+          await ShoppingListService.removeMealIngredients(user.uid, mealId);
+        }
+        toast.success('Cleared all meals and updated shopping list');
+      } catch (error) {
+        console.error('Error clearing meal ingredients:', error);
+        toast.error('Meals cleared but failed to update shopping list');
+      }
+    }
+  };
+
+  // Calendar navigation functions
+  const navigateWeek = (direction) => {
+    const newWeekStart = addWeeks(currentWeekStart, direction);
+    setCurrentWeekStart(newWeekStart);
+  };
+
+  const goToToday = () => {
+    const todayWeekStart = getWeekStart(new Date());
+    setCurrentWeekStart(todayWeekStart);
+  };
+
+  const handleDateSelect = (event) => {
+    const selectedDate = new Date(event.target.value);
+    const weekStart = getWeekStart(selectedDate);
+    setCurrentWeekStart(weekStart);
+    setShowDatePicker(false);
+  };
+
+  const getCurrentWeekDisplay = () => {
+    const weekEnd = new Date(currentWeekStart);
+    weekEnd.setDate(currentWeekStart.getDate() + 6);
+    return formatDateRange(currentWeekStart, weekEnd);
+  };
+
+  const isCurrentWeek = () => {
+    const thisWeekStart = getWeekStart(new Date());
+    return currentWeekStart.getTime() === thisWeekStart.getTime();
+  };
+
+  const randomizeWeek = () => {
+    if (combinedRecipes.length === 0) return;
+    
+    const randomizedMealPlan = {
+      ...mealPlan,
+      meals: mealPlan.meals.map(day => ({
+        ...day,
+        breakfast: getRandomRecipe(),
+        lunch: getRandomRecipe(),
+        dinner: getRandomRecipe()
+      }))
+    };
+    setMealPlan(randomizedMealPlan);
+  };
+
+  const getRandomRecipe = () => {
+    if (combinedRecipes.length === 0) return null;
+    const randomRecipe = combinedRecipes[Math.floor(Math.random() * combinedRecipes.length)];
+    return {
       id: randomRecipe.id,
       title: randomRecipe.title,
       image: randomRecipe.image
     };
-    setMealPlan(updatedMealPlan);
-  };
-
-  const removeMealFromDay = (dayIndex, mealType) => {
-    const updatedMealPlan = { ...mealPlan };
-    updatedMealPlan.meals[dayIndex][mealType] = null;
-    setMealPlan(updatedMealPlan);
-  };
-
-  const MealSlot = ({ meal, dayIndex, mealType, mealLabel }) => {
-    if (meal) {
-      return (
-        <div className="meal-slot relative group">
-          <div 
-            onClick={() => handleRecipeClick(meal.id)}
-            className="meal-card bg-white rounded-lg shadow-sm overflow-hidden cursor-pointer transition-transform hover:scale-105"
-          >
-            <img 
-              src={meal.image} 
-              alt={meal.title}
-              className="w-full h-20 object-cover"
-            />
-            <div className="p-2">
-              <h4 className="meal-type text-xs font-medium text-orange-600 uppercase tracking-wide mb-1">
-                {mealLabel}
-              </h4>
-              <p className="meal-title text-sm font-medium text-gray-900 line-clamp-2 leading-tight">
-                {meal.title}
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              removeMealFromDay(dayIndex, mealType);
-            }}
-            className="remove-meal absolute -top-2 -right-2 w-6 h-6 bg-red-500 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-      );
-    }
-
-    return (
-      <div className="meal-slot">
-        <button
-          onClick={() => addMealToDay(dayIndex, mealType)}
-          className="add-meal w-full h-24 border-2 border-dashed border-gray-300 rounded-lg flex flex-col items-center justify-center text-gray-500 hover:border-orange-400 hover:text-orange-500 transition-colors"
-        >
-          <svg className="w-6 h-6 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          <span className="text-xs font-medium">{mealLabel}</span>
-        </button>
-      </div>
-    );
   };
 
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen text-gray-700">
-        <p>Loading your meal plan...</p>
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-500 mx-auto mb-4"></div>
+          <p>Loading your meal plan...</p>
+        </div>
       </div>
+    );
+  }
+
+  if (showPrepView) {
+    return (
+      <PrepDayView 
+        mealPlan={mealPlan}
+        recipes={combinedRecipes}
+        onBack={() => setShowPrepView(false)}
+        onRecipeClick={handleRecipeClick}
+      />
     );
   }
 
   return (
     <div className="meal-plan-page min-h-screen bg-gray-50 pb-20">
+      {/* Header with Calendar Navigation */}
       <div className="meal-plan-header bg-white shadow-sm">
         <div className="max-w-4xl mx-auto px-6 py-6">
-          <h1 className="page-title text-2xl font-bold text-gray-900 mb-2">Meal Plan</h1>
-          <p className="week-info text-sm text-gray-600">{mealPlan.week}</p>
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h1 className="page-title text-2xl font-bold text-gray-900 mb-1">Meal Plan</h1>
+              <div className="flex items-center space-x-2">
+                <p className="week-info text-lg font-medium text-gray-700">{getCurrentWeekDisplay()}</p>
+                {isCurrentWeek() && (
+                  <span className="bg-green-100 text-green-800 text-xs px-2 py-1 rounded-full font-medium">
+                    Current Week
+                  </span>
+                )}
+              </div>
+            </div>
+            <button
+              id="meal-prep-view-button"
+              onClick={() => setShowPrepView(true)}
+              className="prep-view-btn flex items-center space-x-2 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg transition-colors duration-200"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+              </svg>
+              <span className="hidden sm:inline">Meal Prep</span>
+            </button>
+          </div>
+
+          {/* Week Navigation */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => navigateWeek(-1)}
+                className="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
+
+              <button
+                onClick={() => navigateWeek(1)}
+                className="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+
+              {!isCurrentWeek() && (
+                <button
+                  onClick={goToToday}
+                  className="text-sm text-orange-600 hover:text-orange-700 font-medium px-3 py-1 hover:bg-orange-50 rounded-lg transition-colors"
+                >
+                  Go to Today
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <div className="relative date-picker-container">
+                <button
+                  onClick={() => setShowDatePicker(!showDatePicker)}
+                  className="flex items-center space-x-1 text-gray-600 hover:text-gray-900 hover:bg-gray-100 px-3 py-2 rounded-lg transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                  <span className="text-sm">Jump to Date</span>
+                </button>
+
+                {showDatePicker && (
+                  <div className="absolute right-0 top-full mt-2 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-50">
+                    <input
+                      type="date"
+                      onChange={handleDateSelect}
+                      className="border border-gray-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
       <div className="meal-plan-content max-w-4xl mx-auto p-6">
-        <div className="weekly-overview bg-white rounded-lg shadow-sm p-4 mb-6">
-          <h2 className="overview-title text-lg font-semibold text-gray-900 mb-3">This Week's Overview</h2>
-          <div className="stats-grid grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
-            <div className="stat-item">
-              <div className="stat-number text-2xl font-bold text-orange-500">
-                {mealPlan.meals.reduce((count, day) => 
-                  count + (day.breakfast ? 1 : 0) + (day.lunch ? 1 : 0) + (day.dinner ? 1 : 0), 0
-                )}
-              </div>
-              <div className="stat-label text-sm text-gray-600">Meals Planned</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-number text-2xl font-bold text-blue-500">7</div>
-              <div className="stat-label text-sm text-gray-600">Days</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-number text-2xl font-bold text-green-500">
-                {new Set(mealPlan.meals.flatMap(day => 
-                  [day.breakfast?.id, day.lunch?.id, day.dinner?.id].filter(Boolean)
-                )).size}
-              </div>
-              <div className="stat-label text-sm text-gray-600">Unique Recipes</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-number text-2xl font-bold text-purple-500">
-                {21 - mealPlan.meals.reduce((count, day) => 
-                  count + (day.breakfast ? 1 : 0) + (day.lunch ? 1 : 0) + (day.dinner ? 1 : 0), 0
-                )}
-              </div>
-              <div className="stat-label text-sm text-gray-600">Open Slots</div>
-            </div>
-          </div>
-        </div>
+        {/* Smart Suggestions */}
+        <SmartSuggestions 
+          recipes={combinedRecipes}
+          pantryItems={mockPantryItems}
+          mealHistory={[]} // This would come from user's meal history in a real app
+          onSelectRecipe={handleSuggestionSelect}
+        />
 
-        <div className="days-container space-y-6">
-          {mealPlan.meals.map((day, dayIndex) => (
-            <div key={day.day} className="day-section bg-white rounded-lg shadow-sm overflow-hidden">
-              <div className="day-header bg-gray-50 px-4 py-3 border-b border-gray-200">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="day-name text-lg font-semibold text-gray-900">{day.day}</h3>
-                    <p className="day-date text-sm text-gray-600">{day.date}</p>
-                  </div>
-                  <div className="meals-count text-sm text-gray-500">
-                    {[day.breakfast, day.lunch, day.dinner].filter(Boolean).length}/3 meals
-                  </div>
-                </div>
-              </div>
+        {/* Week View */}
+        <WeekView 
+          mealPlan={mealPlan}
+          onAddMeal={handleAddMeal}
+          onRemoveMeal={handleRemoveMeal}
+          onMoveMeal={handleMoveMeal}
+          onRecipeClick={handleRecipeClick}
+          userRecipes={combinedRecipes}
+        />
 
-              <div className="day-meals p-4">
-                <div className="meals-grid grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <MealSlot 
-                    meal={day.breakfast} 
-                    dayIndex={dayIndex} 
-                    mealType="breakfast" 
-                    mealLabel="Breakfast"
-                  />
-                  <MealSlot 
-                    meal={day.lunch} 
-                    dayIndex={dayIndex} 
-                    mealType="lunch" 
-                    mealLabel="Lunch"
-                  />
-                  <MealSlot 
-                    meal={day.dinner} 
-                    dayIndex={dayIndex} 
-                    mealType="dinner" 
-                    mealLabel="Dinner"
-                  />
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-
+        {/* Action Buttons */}
         <div className="actions-section mt-8 space-y-4">
           <button 
-            onClick={() => {
-              const ingredients = new Set();
-              mealPlan.meals.forEach(day => {
-                [day.breakfast, day.lunch, day.dinner].forEach(meal => {
-                  if (meal) {
-                    const recipe = combinedRecipes.find(r => r.id === meal.id);
-                    if (recipe) {
-                      recipe.ingredients.forEach(ingredient => ingredients.add(ingredient));
-                    }
-                  }
-                });
-              });
-              navigate('/shopping-list', { state: { mealPlanIngredients: Array.from(ingredients) } });
-            }}
-            className="generate-list-btn w-full bg-orange-500 hover:bg-orange-600 text-white font-medium py-3 px-6 rounded-lg transition-colors duration-200"
+            onClick={generateShoppingList}
+            className="generate-list-btn w-full bg-orange-500 hover:bg-orange-600 text-white font-medium py-3 px-6 rounded-lg transition-colors duration-200 flex items-center justify-center space-x-2"
           >
-            Generate Shopping List from Meal Plan
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4m0 0L7 13m0 0l-2.5 2.5M7 13l2.5 2.5" />
+            </svg>
+            <span>Generate Shopping List from Meal Plan</span>
           </button>
           
           <div className="action-buttons grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <button className="btn-secondary">
-              Clear All Meals
+            <button 
+              onClick={clearAllMeals}
+              className="btn-secondary flex items-center justify-center space-x-2"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+              <span>Clear All Meals</span>
             </button>
-            <button className="btn-secondary">
-              Randomize Week
+            <button 
+              onClick={randomizeWeek}
+              className="btn-secondary flex items-center justify-center space-x-2"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              <span>Randomize Week</span>
             </button>
           </div>
         </div>
       </div>
+
+      {/* Add Meal Modal */}
+      <AddMealModal 
+        isOpen={showAddMealModal}
+        onClose={() => {
+          setShowAddMealModal(false);
+          setSelectedMealSlot(null);
+        }}
+        onSelectRecipe={handleSelectRecipe}
+        recipes={combinedRecipes}
+        selectedDay={selectedMealSlot?.day}
+        mealType={selectedMealSlot?.mealType}
+      />
+
+      {/* Shopping List Toast */}
+      <ShoppingListToast 
+        isVisible={toastState.isVisible}
+        onHide={hideToast}
+        recipeName={toastState.recipeName}
+        ingredientCount={toastState.ingredientCount}
+      />
     </div>
   );
 };
+
+const MealPlan = () => (
+  <MealPlanErrorBoundary>
+    <MealPlanComponent />
+  </MealPlanErrorBoundary>
+);
 
 export default MealPlan;
