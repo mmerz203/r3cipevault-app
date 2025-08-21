@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import Header from '../components/Header';
-import { useUser } from '../context/UserContext';
-import { db, saveRecipeForUser } from '../firebase';
+import Header from '@/components/Header';
+import { useUser } from '@/context/UserContext';
+import { db, saveRecipeForUser } from '@/firebase';
+import { callScanFunction } from '@/api/recipes';
+import ScanRecipeButton from '@/components/ScanRecipeButton';
 import toast from 'react-hot-toast';
 import { doc, getDoc } from 'firebase/firestore';
 
@@ -11,6 +13,7 @@ const AddRecipe = () => {
   const { id } = useParams();
   const isEditMode = !!id;
   const { user } = useUser();
+  const [isScanning, setIsScanning] = useState(false);
 
   const [formData, setFormData] = useState({
     title: '',
@@ -51,7 +54,7 @@ const AddRecipe = () => {
       };
       fetchRecipeData();
     }
-  }, [id, user, isEditMode, navigate]);
+  }, [id, user, isEditMode, navigate]); // isEditMode is derived from id, and navigate is stable. You can simplify this to [id, user].
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -164,6 +167,51 @@ const AddRecipe = () => {
     }
   };
 
+  // A helper function to convert a file to a base64 string
+  const toBase64 = file => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => {
+        // The result includes the data URL prefix "data:image/jpeg;base64,",
+        // which we need to remove before sending to the function.
+        const base64String = reader.result.split(',')[1];
+        resolve(base64String);
+    };
+    reader.onerror = error => reject(error);
+  });
+
+  const handleImageCapture = async ({ file }) => {
+    if (!file) return;
+    // Add a guard to ensure the user is authenticated before proceeding.
+    if (!user) {
+      toast.error("You must be signed in to scan a recipe.");
+      return;
+    }
+
+    setIsScanning(true);
+    const loadingToast = toast.loading('Scanning recipe...');
+
+    try {
+      const base64Image = await toBase64(file);
+      const newRecipe = await callScanFunction(base64Image);
+
+      toast.success('Recipe Scanned! Redirecting to edit...', { id: loadingToast });
+      navigate(`/edit-recipe/${newRecipe.id}`);
+    } catch (error) {
+      // Handle specific Firebase internal errors more gracefully
+      if (error.code === 'functions/unauthenticated') {
+        toast.error('Authentication error. Please sign out and sign in again.', { id: loadingToast });
+      } else if (error.code === 'functions/internal') {
+        toast.error('A server error occurred during the scan. Please try again later.', { id: loadingToast });
+      } else {
+        toast.error(error.message || 'Failed to scan recipe.', { id: loadingToast });
+      }
+      console.error('Error during scan:', error);
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
   return (
     <div className="add-recipe-page min-h-screen bg-gray-50">
       <Header showSearch={false} />
@@ -184,6 +232,22 @@ const AddRecipe = () => {
                 </svg>
               </button>
             </div>
+
+            {!isEditMode && (
+              <>
+                <div className="text-center my-4">
+                  <ScanRecipeButton
+                    onImageCapture={handleImageCapture}
+                    disabled={isScanning || !user}
+                  />
+                </div>
+                <div className="flex items-center my-6">
+                  <div className="flex-grow border-t border-gray-300"></div>
+                  <span className="flex-shrink mx-4 text-gray-500">OR</span>
+                  <div className="flex-grow border-t border-gray-300"></div>
+                </div>
+              </>
+            )}
 
             <form onSubmit={handleSubmit} className="space-y-6">
               <div>
