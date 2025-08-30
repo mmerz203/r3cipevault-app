@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
-import { mockPantryItems } from '../data/mockData';
+import React, { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
+import * as pantryApi from '@/services/pantryService';
 
 const PantryPage = () => {
-  const [items, setItems] = useState(mockPantryItems);
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [newItem, setNewItem] = useState('');
   const [newQuantity, setNewQuantity] = useState('');
   const [newCategory, setNewCategory] = useState('');
@@ -11,27 +12,54 @@ const PantryPage = () => {
 
   const categories = ['Grains', 'Oils', 'Spices', 'Canned Goods', 'Dairy', 'Produce', 'Other'];
 
-  const addItem = (e) => {
+  useEffect(() => {
+    const fetchItems = async () => {
+      setLoading(true);
+      try {
+        const fetchedItems = await pantryApi.getPantryItems();
+        setItems(fetchedItems);
+      } catch (error) {
+        toast.error(error.message || 'Failed to load pantry items.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchItems();
+  }, []);
+
+  const addItem = async (e) => {
     e.preventDefault();
     if (newItem.trim()) {
-      const item = {
-        id: Date.now(),
+      const itemData = {
         item: newItem.trim(),
         quantity: newQuantity.trim() || '1',
         category: newCategory || 'Other',
         expiryDate: newExpiryDate
       };
-      setItems([...items, item]);
-      setNewItem('');
-      setNewQuantity('');
-      setNewCategory('');
-      setNewExpiryDate('');
-      toast.success(`'${item.item}' added to pantry!`);
+      try {
+        const addedItem = await pantryApi.addPantryItem(itemData);
+        setItems(prevItems => [...prevItems, addedItem]);
+        setNewItem('');
+        setNewQuantity('');
+        setNewCategory('');
+        setNewExpiryDate('');
+        toast.success(`'${addedItem.item}' added to pantry!`);
+      } catch (error) {
+        toast.error(error.message || 'Failed to add item.');
+      }
     }
   };
 
-  const removeItem = (id) => {
-    setItems(items.filter(item => item.id !== id));
+  const removeItem = async (id) => {
+    const originalItems = items;
+    setItems(items.filter(item => item.id !== id)); // Optimistic update
+    try {
+      await pantryApi.removePantryItem(id);
+      toast.success('Item removed from pantry.');
+    } catch (error) {
+      setItems(originalItems); // Revert on error
+      toast.error(error.message || 'Failed to remove item.');
+    }
   };
 
   const isExpiringSoon = (expiryDate) => {
@@ -57,6 +85,17 @@ const PantryPage = () => {
     groups[category].push(item);
     return groups;
   }, {});
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen text-gray-700">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-500 mx-auto mb-4"></div>
+          <p>Loading your pantry...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="pantry-page min-h-screen bg-gray-50 pb-20">

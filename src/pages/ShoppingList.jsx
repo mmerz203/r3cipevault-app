@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useUser } from '../context/UserContext';
-import { ShoppingListService } from '../services/shoppingListService';
-import { mockShoppingList } from '../data/mockData';
+import * as shoppingListApi from '../services/shoppingListService';
 import toast from 'react-hot-toast';
 
 const ShoppingList = () => {
@@ -17,44 +16,43 @@ const ShoppingList = () => {
   const mealPlanIngredients = location.state?.mealPlanIngredients || [];
 
   useEffect(() => {
-    if (user) {
-      // Set up real-time listener for shopping list
-      const unsubscribe = ShoppingListService.listenToShoppingList(user.uid, (fetchedItems) => {
+    // The user check is now handled by the backend via secure cookies/tokens.
+    // The API service will fail if the user is not authenticated.
+    const fetchItems = async () => {
+      setLoading(true);
+      try {
+        const fetchedItems = await shoppingListApi.getShoppingList();
         setItems(fetchedItems);
+      } catch (error) {
+        toast.error(error.message || 'Failed to load shopping list.');
+        setItems([]); // Clear items on error
+      } finally {
         setLoading(false);
-      });
+      }
+    };
 
-      return unsubscribe;
-    } else {
-      // Use mock data for non-authenticated users
-      setItems(mockShoppingList);
-      setLoading(false);
-    }
+    fetchItems();
   }, [user]);
 
-  // Add meal plan ingredients when page loads with them
-  useEffect(() => {
+useEffect(() => {
+    // This condition checks if the function should run.
     if (user && mealPlanIngredients.length > 0) {
-      addMealPlanIngredients();
+      const addIngredients = async () => {
+        try {
+          // The backend will now handle the logic of adding/updating items
+          // from the meal plan ingredients list.
+          const updatedItems = await shoppingListApi.addMealPlanIngredients(mealPlanIngredients);
+          setItems(updatedItems); // Refresh the list with the updated data from the server
+          toast.success(`Added ${mealPlanIngredients.length} ingredients from meal plan!`);
+        } catch (error) {
+          console.error('Error adding meal plan ingredients:', error);
+          toast.error(error.message || 'Failed to add some ingredients from meal plan');
+        }
+      };
+      
+      addIngredients();
     }
   }, [user, mealPlanIngredients]);
-
-  const addMealPlanIngredients = async () => {
-    try {
-      for (const ingredient of mealPlanIngredients) {
-        await ShoppingListService.addOrUpdateItem(
-          user.uid, 
-          ingredient, 
-          '1', // Default quantity for generated ingredients
-          'meal_plan'
-        );
-      }
-      toast.success(`Added ${mealPlanIngredients.length} ingredients from meal plan!`);
-    } catch (error) {
-      console.error('Error adding meal plan ingredients:', error);
-      toast.error('Failed to add some ingredients from meal plan');
-    }
-  };
 
   const toggleItem = async (itemId) => {
     const item = items.find(i => i.id === itemId);
@@ -67,17 +65,15 @@ const ShoppingList = () => {
       item.id === itemId ? { ...item, completed: newCompleted } : item
     ));
 
-    if (user) {
-      try {
-        await ShoppingListService.toggleItemCompletion(user.uid, itemId, newCompleted);
-      } catch (error) {
-        console.error('Error toggling item:', error);
-        // Revert optimistic update
-        setItems(items.map(item => 
-          item.id === itemId ? { ...item, completed: !newCompleted } : item
-        ));
-        toast.error('Failed to update item');
-      }
+    try {
+      await shoppingListApi.toggleItem(itemId, newCompleted);
+    } catch (error) {
+      console.error('Error toggling item:', error);
+      // Revert optimistic update
+      setItems(items.map(item => 
+        item.id === itemId ? { ...item, completed: !newCompleted } : item
+      ));
+      toast.error(error.message || 'Failed to update item');
     }
   };
 
@@ -85,58 +81,45 @@ const ShoppingList = () => {
     e.preventDefault();
     if (!newItem.trim()) return;
 
-    const tempId = Date.now();
-    const tempItem = {
-      id: tempId,
-      item: newItem.trim(),
-      quantity: newQuantity.trim() || '1',
-      completed: false,
-      source: 'manual'
-    };
-
-    // Optimistic update
-    setItems([tempItem, ...items]);
+    const originalItems = items;
     setNewItem('');
     setNewQuantity('');
 
-    if (user) {
-      try {
-        await ShoppingListService.addOrUpdateItem(
-          user.uid, 
-          tempItem.item, 
-          tempItem.quantity, 
-          'manual'
-        );
-      } catch (error) {
-        console.error('Error adding item:', error);
-        // Remove temp item on error
-        setItems(items.filter(item => item.id !== tempId));
-        toast.error('Failed to add item');
-      }
+    try {
+      // The API now handles creating the item and returns the updated list.
+      // For a more responsive UI, we could add the item optimistically
+      // and then replace it with the server-returned version.
+      // For simplicity here, we'll just refetch.
+      const newItemData = await shoppingListApi.addItem(newItem.trim(), newQuantity.trim());
+      // The backend should return the newly created item, or the full list.
+      // Assuming it returns the new item.
+      setItems(prevItems => [newItemData, ...prevItems]);
+    } catch (error) {
+      console.error('Error adding item:', error);
+      setItems(originalItems); // Revert on error
+      toast.error(error.message || 'Failed to add item');
     }
   };
 
   const removeItem = async (itemId) => {
     const itemToRemove = items.find(item => item.id === itemId);
-    
     // Optimistic update
     setItems(items.filter(item => item.id !== itemId));
 
-    if (user) {
-      try {
-        await ShoppingListService.removeItem(user.uid, itemId);
-        toast.success('Item removed');
-      } catch (error) {
-        console.error('Error removing item:', error);
-        // Revert optimistic update
-        setItems([...items, itemToRemove]);
-        toast.error('Failed to remove item');
-      }
+    try {
+      await shoppingListApi.removeItem(itemId);
+      toast.success('Item removed');
+    } catch (error) {
+      console.error('Error removing item:', error);
+      // Revert optimistic update
+      setItems([...items, itemToRemove]);
+      toast.error(error.message || 'Failed to remove item');
     }
   };
 
   const clearCompleted = async () => {
     const completedItems = items.filter(item => item.completed);
+    const remainingItems = items.filter(item => !item.completed);
     
     if (completedItems.length === 0) {
       toast.error('No completed items to clear');
@@ -144,20 +127,15 @@ const ShoppingList = () => {
     }
 
     // Optimistic update
-    setItems(items.filter(item => !item.completed));
+    setItems(remainingItems);
 
-    if (user) {
-      try {
-        for (const item of completedItems) {
-          await ShoppingListService.removeItem(user.uid, item.id);
-        }
-        toast.success(`Cleared ${completedItems.length} completed items`);
-      } catch (error) {
-        console.error('Error clearing completed items:', error);
-        // Revert optimistic update
-        setItems([...items, ...completedItems]);
-        toast.error('Failed to clear some items');
-      }
+    try {
+      await shoppingListApi.clearCompletedItems();
+      toast.success(`Cleared ${completedItems.length} completed items`);
+    } catch (error) {
+      console.error('Error clearing completed items:', error);
+      setItems(items); // Revert optimistic update
+      toast.error(error.message || 'Failed to clear some items');
     }
   };
 

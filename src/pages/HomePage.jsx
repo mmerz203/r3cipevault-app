@@ -2,64 +2,53 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Header from '../components/Header';
 import RecipeGrid from '../components/RecipeGrid';
-import { mockRecipes } from '../data/mockData';
 import { useUser } from '../context/UserContext';
-import { db } from '../firebase';
-import { collection, query, onSnapshot, orderBy } from 'firebase/firestore';
+import toast from 'react-hot-toast';
+import { getRecipes } from '@/services/recipeService';
 
 const HomePage = () => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [userRecipes, setUserRecipes] = useState([]);
+  const [recipes, setRecipes] = useState([]);
   const [loading, setLoading] = useState(true);
   const { user } = useUser();
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (!user) {
-      setLoading(false);
-      return;
-    }
-
-    const recipesRef = collection(db, 'users', user.uid, 'recipes');
-    const q = query(recipesRef, orderBy('id', 'desc'));
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const fetchedRecipes = snapshot.docs.map(doc => doc.data());
-      setUserRecipes(fetchedRecipes);
-      setLoading(false);
-    }, (error) => {
-      console.error("Error fetching user recipes: ", error);
-      setLoading(false);
-    });
-
-    return () => unsubscribe();
-  }, [user]);
-
-  const combinedRecipes = useMemo(() => {
-    const allRecipes = [...userRecipes, ...mockRecipes];
-    const uniqueRecipes = [];
-    const seenIds = new Set();
-    for (const recipe of allRecipes) {
-      if (!seenIds.has(recipe.id)) {
-        uniqueRecipes.push(recipe);
-        seenIds.add(recipe.id);
+    const fetchRecipes = async () => {
+      setLoading(true);
+      try {
+        // The new API endpoint will return all recipes for the user,
+        // including any "default" or "mock" recipes if that's the desired logic.
+        const fetchedRecipes = await getRecipes();
+        setRecipes(fetchedRecipes);
+      } catch (error) {
+        toast.error(error.message || "Failed to load recipes.");
+        console.error("Error fetching recipes:", error);
+      } finally {
+        setLoading(false);
       }
+    };
+    // Fetch recipes if the user is loaded. The backend will handle authorization.
+    if (user) {
+      fetchRecipes();
+    } else if (user === null) { // user is loaded, but not logged in
+      setLoading(false);
+      setRecipes([]); // Or set to public/mock recipes if the app supports that
     }
-    return uniqueRecipes;
-  }, [userRecipes]);
+  }, [user]);
 
   const filteredRecipes = useMemo(() => {
     if (!searchTerm.trim()) {
-      return combinedRecipes;
+      return recipes;
     }
     
-    return combinedRecipes.filter(recipe =>
+    return recipes.filter(recipe =>
       recipe.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
       recipe.ingredients.some(ingredient => 
         ingredient.toLowerCase().includes(searchTerm.toLowerCase())
       )
     );
-  }, [searchTerm, combinedRecipes]);
+  }, [searchTerm, recipes]);
 
   const handleSearch = (term) => {
     setSearchTerm(term);

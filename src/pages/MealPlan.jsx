@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { mockMealPlan, mockRecipes, mockPantryItems } from '../data/mockData';
+import { mockPantryItems } from '../data/mockData';
 import { useUser } from '../context/UserContext';
-import { db } from '../firebase';
-import { collection, query, onSnapshot } from 'firebase/firestore';
-import { ShoppingListService } from '../services/shoppingListService';
+import { getRecipes } from '@/services/recipeService';
+import * as shoppingListApi from '@/services/shoppingListService';
 import { generateWeekMealPlan, addWeeks, getWeekStart, formatDateRange, isToday } from '../utils/dateUtils';
 import WeekView from '../components/meal-plan/WeekView';
 import AddMealModal from '../components/meal-plan/AddMealModal';
@@ -17,7 +16,7 @@ import toast from 'react-hot-toast';
 const MealPlanComponent = () => {
   const navigate = useNavigate();
   const [currentWeekStart, setCurrentWeekStart] = useState(() => getWeekStart(new Date()));
-  const [mealPlan, setMealPlan] = useState(() => generateWeekMealPlan(getWeekStart(new Date())));
+  const [mealPlan, setMealPlan] = useState(() => generateWeekMealPlan(getWeekStart(new Date()))); // This could also be fetched from a backend
   const [userRecipes, setUserRecipes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddMealModal, setShowAddMealModal] = useState(false);
@@ -48,67 +47,27 @@ const MealPlanComponent = () => {
   }, [showDatePicker]);
 
   useEffect(() => {
-    if (!user) {
-      setLoading(false);
-      return;
-    }
-
-    let unsubscribe = null;
-
-    const setupFirebaseListener = async () => {
+    const fetchUserRecipes = async () => {
+      setLoading(true);
       try {
-        const recipesRef = collection(db, 'users', user.uid, 'recipes');
-        const q = query(recipesRef);
-
-        unsubscribe = onSnapshot(q, (snapshot) => {
-          try {
-            const fetchedRecipes = snapshot.docs.map(doc => doc.data());
-            setUserRecipes(fetchedRecipes);
-            setLoading(false);
-          } catch (error) {
-            console.error("Error processing Firebase snapshot:", error);
-            setUserRecipes([]);
-            setLoading(false);
-          }
-        }, (error) => {
-          console.error("Firebase connection error:", error);
-          // Fallback to empty user recipes if Firebase fails
-          setUserRecipes([]);
-          setLoading(false);
-        });
+        // The backend now provides the consolidated list of user recipes and any defaults.
+        const fetchedRecipes = await getRecipes();
+        setUserRecipes(fetchedRecipes);
       } catch (error) {
-        console.error("Error setting up Firebase listener:", error);
-        // If Firebase setup fails completely, continue with empty user recipes
+        console.error("Error fetching user recipes:", error);
+        toast.error(error.message || 'Failed to load your recipes.');
         setUserRecipes([]);
+      } finally {
         setLoading(false);
       }
     };
 
-    setupFirebaseListener();
-
-    return () => {
-      if (unsubscribe) {
-        try {
-          unsubscribe();
-        } catch (error) {
-          console.error("Error unsubscribing from Firebase:", error);
-        }
-      }
-    };
-  }, [user]);
-
-  const combinedRecipes = useMemo(() => {
-    const allRecipes = [...userRecipes, ...mockRecipes];
-    const uniqueRecipes = [];
-    const seenIds = new Set();
-    for (const recipe of allRecipes) {
-      if (!seenIds.has(recipe.id)) {
-        uniqueRecipes.push(recipe);
-        seenIds.add(recipe.id);
-      }
+    if (user) {
+      fetchUserRecipes();
+    } else if (user === null) { // User is loaded, but not logged in
+      setLoading(false);
     }
-    return uniqueRecipes;
-  }, [userRecipes]);
+  }, [user]);
 
   const handleRecipeClick = (recipeId) => {
     if (recipeId) {
@@ -133,21 +92,14 @@ const MealPlanComponent = () => {
       setMealPlan(updatedMealPlan);
 
       // Automatically add recipe ingredients to shopping list
-      if (user && recipe.ingredients) {
+      if (recipe.ingredients && recipe.ingredients.length > 0) {
         try {
-          for (const ingredient of recipe.ingredients) {
-            await ShoppingListService.addOrUpdateItem(
-              user.uid,
-              ingredient,
-              '1', // Default quantity, will be aggregated intelligently
-              'meal_plan',
-              recipe.id
-            );
-          }
+          // The backend will handle adding all ingredients and aggregating quantities.
+          await shoppingListApi.addMealPlanIngredients(recipe.ingredients);
           toast.success(`Added ${recipe.ingredients.length} ingredients to shopping list`);
         } catch (error) {
           console.error('Error adding ingredients to shopping list:', error);
-          toast.error('Failed to update shopping list');
+          toast.error(error.message || 'Failed to update shopping list');
         }
       }
 
@@ -166,13 +118,13 @@ const MealPlanComponent = () => {
     setMealPlan(updatedMealPlan);
 
     // Remove meal ingredients from shopping list
-    if (user && removedMeal) {
+    if (removedMeal) {
       try {
-        await ShoppingListService.removeMealIngredients(user.uid, removedMeal.id);
+        await shoppingListApi.removeMealIngredients(removedMeal.id);
         toast.success('Removed meal ingredients from shopping list');
       } catch (error) {
         console.error('Error removing meal ingredients:', error);
-        toast.error('Failed to update shopping list');
+        toast.error(error.message || 'Failed to update shopping list');
       }
     }
   };
@@ -215,7 +167,7 @@ const MealPlanComponent = () => {
     mealPlan.meals.forEach(day => {
       [day.breakfast, day.lunch, day.dinner].forEach(meal => {
         if (meal) {
-          const recipe = combinedRecipes.find(r => r.id === meal.id);
+          const recipe = userRecipes.find(r => r.id === meal.id);
           if (recipe) {
             recipe.ingredients?.forEach(ingredient => ingredients.add(ingredient));
           }
@@ -246,15 +198,15 @@ const MealPlanComponent = () => {
     setMealPlan(clearedMealPlan);
 
     // Remove all meal ingredients from shopping list
-    if (user && currentMealIds.size > 0) {
+    if (currentMealIds.size > 0) {
       try {
         for (const mealId of currentMealIds) {
-          await ShoppingListService.removeMealIngredients(user.uid, mealId);
+          await shoppingListApi.removeMealIngredients(mealId);
         }
         toast.success('Cleared all meals and updated shopping list');
       } catch (error) {
         console.error('Error clearing meal ingredients:', error);
-        toast.error('Meals cleared but failed to update shopping list');
+        toast.error(error.message || 'Meals cleared but failed to update shopping list');
       }
     }
   };
@@ -289,7 +241,7 @@ const MealPlanComponent = () => {
   };
 
   const randomizeWeek = () => {
-    if (combinedRecipes.length === 0) return;
+    if (userRecipes.length === 0) return;
     
     const randomizedMealPlan = {
       ...mealPlan,
@@ -304,8 +256,8 @@ const MealPlanComponent = () => {
   };
 
   const getRandomRecipe = () => {
-    if (combinedRecipes.length === 0) return null;
-    const randomRecipe = combinedRecipes[Math.floor(Math.random() * combinedRecipes.length)];
+    if (userRecipes.length === 0) return null;
+    const randomRecipe = userRecipes[Math.floor(Math.random() * userRecipes.length)];
     return {
       id: randomRecipe.id,
       title: randomRecipe.title,
@@ -328,7 +280,7 @@ const MealPlanComponent = () => {
     return (
       <PrepDayView 
         mealPlan={mealPlan}
-        recipes={combinedRecipes}
+        recipes={userRecipes}
         onBack={() => setShowPrepView(false)}
         onRecipeClick={handleRecipeClick}
       />
@@ -425,7 +377,7 @@ const MealPlanComponent = () => {
       <div className="meal-plan-content max-w-4xl mx-auto p-6">
         {/* Smart Suggestions */}
         <SmartSuggestions 
-          recipes={combinedRecipes}
+          recipes={userRecipes}
           pantryItems={mockPantryItems}
           mealHistory={[]} // This would come from user's meal history in a real app
           onSelectRecipe={handleSuggestionSelect}
@@ -438,7 +390,7 @@ const MealPlanComponent = () => {
           onRemoveMeal={handleRemoveMeal}
           onMoveMeal={handleMoveMeal}
           onRecipeClick={handleRecipeClick}
-          userRecipes={combinedRecipes}
+          userRecipes={userRecipes}
         />
 
         {/* Action Buttons */}
@@ -484,7 +436,7 @@ const MealPlanComponent = () => {
           setSelectedMealSlot(null);
         }}
         onSelectRecipe={handleSelectRecipe}
-        recipes={combinedRecipes}
+        recipes={userRecipes}
         selectedDay={selectedMealSlot?.day}
         mealType={selectedMealSlot?.mealType}
       />

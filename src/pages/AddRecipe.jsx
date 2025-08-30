@@ -2,11 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import Header from '@/components/Header';
 import { useUser } from '@/context/UserContext';
-import { db, saveRecipeForUser } from '@/firebase';
-import { callScanFunction } from '@/api/recipes';
 import ScanRecipeButton from '@/components/ScanRecipeButton';
 import toast from 'react-hot-toast';
-import { doc, getDoc } from 'firebase/firestore';
+import { getRecipeById, createManualRecipe, updateRecipeById, scanRecipeWithImage } from '@/services/recipeService';
 
 const AddRecipe = () => {
   const navigate = useNavigate();
@@ -26,35 +24,44 @@ const AddRecipe = () => {
   });
 
   useEffect(() => {
-    if (isEditMode && user) {
+    // In "add" mode (no recipe ID), always ensure the form is reset.
+    if (!isEditMode) {
+      setFormData({
+        title: '',
+        description: '',
+        ingredients: [''],
+        instructions: [''],
+        cookTime: '',
+        servings: '',
+        difficulty: 'Easy'
+      });
+      return;
+    }
+
+    // In "edit" mode, wait for the user object before fetching the recipe.
+    // This prevents the form from being cleared if user data is still loading.
+    if (isEditMode) {
       const fetchRecipeData = async () => {
-        const recipeRef = doc(db, 'users', user.uid, 'recipes', id);
         try {
-          const docSnap = await getDoc(recipeRef);
-          if (docSnap.exists()) {
-            const recipeData = docSnap.data();
-            setFormData({
-              title: recipeData.title || '',
-              description: recipeData.description || '',
-              ingredients: recipeData.ingredients || [''],
-              instructions: recipeData.instructions || [''],
-              cookTime: parseInt(recipeData.cookTime) || '',
-              servings: recipeData.servings || '',
-              difficulty: recipeData.difficulty || 'Easy',
-            });
-          } else {
-            toast.error("Recipe not found for editing.");
-            navigate('/');
-          }
+          const recipeData = await getRecipeById(id);
+          setFormData({
+            title: recipeData.title || '',
+            description: recipeData.description || '',
+            ingredients: recipeData.ingredients || [''],
+            instructions: recipeData.instructions || [''],
+            cookTime: recipeData.cookTime || '',
+            servings: recipeData.servings || '',
+            difficulty: recipeData.difficulty || 'Easy',
+          });
         } catch (error) {
-          toast.error("Failed to load recipe data.");
-          console.error("Error fetching recipe for edit:", error);
+          toast.error(error.message || "Failed to load recipe data.");
+          console.error("Error fetching recipe for edit:", error.message);
           navigate('/');
         }
       };
       fetchRecipeData();
     }
-  }, [id, user, isEditMode, navigate]); // isEditMode is derived from id, and navigate is stable. You can simplify this to [id, user].
+  }, [id, isEditMode, navigate]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -64,52 +71,27 @@ const AddRecipe = () => {
     }));
   };
 
-  const handleIngredientChange = (index, value) => {
-    const newIngredients = [...formData.ingredients];
-    newIngredients[index] = value;
+  const handleDynamicListChange = (field, index, value) => {
+    const newList = [...formData[field]];
+    newList[index] = value;
     setFormData(prev => ({
       ...prev,
-      ingredients: newIngredients
+      [field]: newList
     }));
   };
 
-  const addIngredient = () => {
+  const addDynamicListItem = (field) => {
     setFormData(prev => ({
       ...prev,
-      ingredients: [...prev.ingredients, '']
+      [field]: [...prev[field], '']
     }));
   };
 
-  const removeIngredient = (index) => {
-    if (formData.ingredients.length > 1) {
+  const removeDynamicListItem = (field, index) => {
+    if (formData[field].length > 1) {
       setFormData(prev => ({
         ...prev,
-        ingredients: prev.ingredients.filter((_, i) => i !== index)
-      }));
-    }
-  };
-
-  const handleInstructionChange = (index, value) => {
-    const newInstructions = [...formData.instructions];
-    newInstructions[index] = value;
-    setFormData(prev => ({
-      ...prev,
-      instructions: newInstructions
-    }));
-  };
-
-  const addInstruction = () => {
-    setFormData(prev => ({
-      ...prev,
-      instructions: [...prev.instructions, '']
-    }));
-  };
-
-  const removeInstruction = (index) => {
-    if (formData.instructions.length > 1) {
-      setFormData(prev => ({
-        ...prev,
-        instructions: prev.instructions.filter((_, i) => i !== index)
+        [field]: prev[field].filter((_, i) => i !== index)
       }));
     }
   };
@@ -131,54 +113,34 @@ const AddRecipe = () => {
 
     const recipePayload = {
       ...formData,
-      cookTime: `${formData.cookTime} mins`,
+      cookTime: Number(formData.cookTime) || null,
+      servings: Number(formData.servings) || null,
       ingredients: finalIngredients,
       instructions: finalInstructions,
     };
+    
+    const fullRecipePayload = {
+      ...recipePayload,
+      image: `https://source.unsplash.com/random/800x600/?food,${encodeURIComponent(formData.title)}`,
+    };
 
-    if (isEditMode) {
-      const updatedRecipe = {
-        ...recipePayload,
-        id: id, // Keep the existing ID
-        image: `https://source.unsplash.com/random/800x600/?food,${encodeURIComponent(formData.title)}`,
-      };
-      try {
-        await saveRecipeForUser(user.uid, updatedRecipe);
+    try {
+      if (isEditMode) {
+        await updateRecipeById(id, fullRecipePayload);
         toast.success('Recipe updated successfully!');
         navigate(`/recipes/${id}`);
-      } catch (error) {
-        toast.error('Failed to update recipe. Please try again.');
-        console.error("Error updating recipe:", error);
-      }
-    } else {
-      const newRecipe = {
-        ...recipePayload,
-        id: crypto.randomUUID(),
-        image: `https://source.unsplash.com/random/800x600/?food,${encodeURIComponent(formData.title)}`,
-      };
-      try {
-        await saveRecipeForUser(user.uid, newRecipe);
+      } else {
+        // The backend will generate the ID and return the full recipe object.
+        const newRecipe = await createManualRecipe(fullRecipePayload);
         toast.success('Recipe added successfully!');
-        navigate('/');
-      } catch (error) {
-        toast.error('Failed to save recipe. Please try again.');
-        console.error("Error saving new recipe:", error);
+        navigate(`/recipes/${newRecipe.id}`); // Navigate to the new recipe's page
       }
+    } catch (error) {
+      const action = isEditMode ? 'update' : 'save';
+      toast.error(error.message || `Failed to ${action} recipe. Please try again.`);
+      console.error(`Error ${action}ing recipe:`, error);
     }
   };
-
-  // A helper function to convert a file to a base64 string
-  const toBase64 = file => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = () => {
-        // The result includes the data URL prefix "data:image/jpeg;base64,",
-        // which we need to remove before sending to the function.
-        const base64String = reader.result.split(',')[1];
-        resolve(base64String);
-    };
-    reader.onerror = error => reject(error);
-  });
 
   const handleImageCapture = async ({ file }) => {
     if (!file) return;
@@ -192,20 +154,12 @@ const AddRecipe = () => {
     const loadingToast = toast.loading('Scanning recipe...');
 
     try {
-      const base64Image = await toBase64(file);
-      const newRecipe = await callScanFunction(base64Image);
+      const newRecipe = await scanRecipeWithImage(file);
 
       toast.success('Recipe Scanned! Redirecting to edit...', { id: loadingToast });
       navigate(`/edit-recipe/${newRecipe.id}`);
     } catch (error) {
-      // Handle specific Firebase internal errors more gracefully
-      if (error.code === 'functions/unauthenticated') {
-        toast.error('Authentication error. Please sign out and sign in again.', { id: loadingToast });
-      } else if (error.code === 'functions/internal') {
-        toast.error('A server error occurred during the scan. Please try again later.', { id: loadingToast });
-      } else {
-        toast.error(error.message || 'Failed to scan recipe.', { id: loadingToast });
-      }
+      toast.error(error.message || 'Failed to scan recipe.', { id: loadingToast });
       console.error('Error during scan:', error);
     } finally {
       setIsScanning(false);
@@ -332,7 +286,7 @@ const AddRecipe = () => {
                     <input
                       type="text"
                       value={ingredient}
-                      onChange={(e) => handleIngredientChange(index, e.target.value)}
+                      onChange={(e) => handleDynamicListChange('ingredients', index, e.target.value)}
                       required
                       className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                       placeholder={`Ingredient ${index + 1}`}
@@ -340,7 +294,7 @@ const AddRecipe = () => {
                     {formData.ingredients.length > 1 && (
                       <button
                         type="button"
-                        onClick={() => removeIngredient(index)}
+                        onClick={() => removeDynamicListItem('ingredients', index)}
                         className="px-3 py-2 text-red-600 hover:text-red-800"
                       >
                         ✕
@@ -350,7 +304,7 @@ const AddRecipe = () => {
                 ))}
                 <button
                   type="button"
-                  onClick={addIngredient}
+                  onClick={() => addDynamicListItem('ingredients')}
                   className="text-blue-600 hover:text-blue-800 text-sm"
                 >
                   + Add Ingredient
@@ -368,7 +322,7 @@ const AddRecipe = () => {
                     </div>
                     <textarea
                       value={instruction}
-                      onChange={(e) => handleInstructionChange(index, e.target.value)}
+                      onChange={(e) => handleDynamicListChange('instructions', index, e.target.value)}
                       required
                       rows={2}
                       className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -377,7 +331,7 @@ const AddRecipe = () => {
                     {formData.instructions.length > 1 && (
                       <button
                         type="button"
-                        onClick={() => removeInstruction(index)}
+                        onClick={() => removeDynamicListItem('instructions', index)}
                         className="px-3 py-2 text-red-600 hover:text-red-800"
                       >
                         ✕
@@ -387,7 +341,7 @@ const AddRecipe = () => {
                 ))}
                 <button
                   type="button"
-                  onClick={addInstruction}
+                  onClick={() => addDynamicListItem('instructions')}
                   className="text-blue-600 hover:text-blue-800 text-sm"
                 >
                   + Add Step

@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useUser } from '../context/UserContext';
-import { auth, signOut } from '../firebase'; // Ensure signOut is imported from firebase
+import { useNavigate } from 'react-router-dom';
 
 const AccountMenu = () => {
-  const { user } = useUser();
+  const { user, logout } = useUser();
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef(null);
+   const navigate = useNavigate();
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -19,17 +20,13 @@ const AccountMenu = () => {
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, []);
+  }, [isOpen]);
 
   const handleSignOut = async () => {
-    try {
-      await signOut(auth);
-      // The onAuthStateChanged listener in UserContext will handle the user state change.
-      setIsOpen(false);
-    } catch (error) {
-      console.error("Error signing out:", error);
-      alert('An error occurred while signing out. Please try again.');
-    }
+   await logout();
+    setIsOpen(false);
+    // Navigate to login page after logout for a better user experience.
+    navigate('/login');
   };
 
   const toggleMenu = () => {
